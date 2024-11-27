@@ -1,13 +1,13 @@
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, MessageHandler, filters
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 from models import User, UserRole
 from database import session_scope
 from .common import show_main_menu
 
 # Состояния админского меню
-ADMIN_MENU, VIEW_USERS, MANAGE_USER = range(3)
+ADMIN_MENU, VIEW_USERS, SELECT_USER, CONFIRM_ACTION = range(4)
 
-async def admin_required(func):
+def admin_required(func):
     """Декоратор для проверки прав администратора"""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with session_scope() as session:
@@ -24,15 +24,14 @@ async def admin_required(func):
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать админское меню"""
     keyboard = [
-        [KeyboardButton("👥 Просмотр пользователей")],
-        [KeyboardButton("👑 Назначить администратора")],
-        [KeyboardButton("❌ Заблокировать пользователя")],
+        [KeyboardButton("👥 Управление пользователями")],
+        [KeyboardButton("📊 Статистика")],
         [KeyboardButton("🔙 Вернуться в главное меню")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
-        '🛠 Панель администратора\n'
+        '⚙️ Панель администратора\n'
         'Выберите действие:',
         reply_markup=reply_markup
     )
@@ -48,84 +47,183 @@ async def view_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text('📝 Список пользователей пуст.')
             return ADMIN_MENU
         
-        message = "📋 Список пользователей:\n\n"
+        # Создаем инлайн-кнопки для каждого пользователя
+        keyboard = []
         for user in users:
-            message += (
-                f"👤 {user.last_name} {user.first_name}\n"
-                f"💼 Должность: {user.position}\n"
-                f"🚂 Дорога: {user.railway.value}\n"
-                f"🏢 Отделение: {user.branch}\n"
-                f"🎭 Роль: {user.role.value}\n"
-                f"🆔 ID: {user.id}\n"
-                "➖➖➖➖➖➖➖➖➖➖\n"
+            status = "👑" if user.is_admin else "🚫" if user.is_blocked else "✅"
+            button = InlineKeyboardButton(
+                f"{status} {user.full_name} ({user.position})",
+                callback_data=f"user_{user.id}"
             )
+            keyboard.append([button])
         
-        await update.message.reply_text(message)
-    return ADMIN_MENU
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_admin")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "👥 Список пользователей\n"
+            "Нажмите на пользователя для управления:",
+            reply_markup=reply_markup
+        )
+        return SELECT_USER
 
 @admin_required
-async def set_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Назначение пользователя администратором"""
-    try:
-        user_id = int(context.args[0])
-    except (ValueError, IndexError):
-        await update.message.reply_text(
-            '⚠️ Пожалуйста, укажите корректный ID пользователя.\n'
-            'Пример: /set_admin 123456789'
-        )
+async def handle_user_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора пользователя"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "back_to_admin":
+        await admin_menu(update, context)
         return ADMIN_MENU
+    
+    user_id = int(query.data.split('_')[1])
+    context.user_data['selected_user_id'] = user_id
     
     with session_scope() as session:
-        user = session.query(User).filter(User.id == user_id).first()
+        user = session.query(User).get(user_id)
         if not user:
-            await update.message.reply_text('❌ Пользователь не найден.')
+            await query.message.edit_text("❌ Пользователь не найден")
             return ADMIN_MENU
         
-        user.role = UserRole.ADMIN
+        status = "Администратор" if user.is_admin else "Заблокирован" if user.is_blocked else "Активен"
         
-        await update.message.reply_text(
-            f'✅ Пользователь {user.last_name} {user.first_name} '
-            f'назначен администратором.'
+        # Создаем кнопки действий
+        keyboard = []
+        if not user.is_admin:
+            keyboard.append([InlineKeyboardButton("👑 Назначить администратором", 
+                                                callback_data=f"make_admin_{user_id}")])
+        if user.is_blocked:
+            keyboard.append([InlineKeyboardButton("✅ Разблокировать", 
+                                                callback_data=f"unblock_{user_id}")])
+        else:
+            keyboard.append([InlineKeyboardButton("🚫 Заблокировать", 
+                                                callback_data=f"block_{user_id}")])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад к списку", callback_data="back_to_list")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.message.edit_text(
+            f"👤 Пользователь: {user.full_name}\n"
+            f"📱 Telegram ID: {user.id}\n"
+            f"📋 Должность: {user.position}\n"
+            f"🏢 Отделение: {user.branch}\n"
+            f"🔑 Статус: {status}\n\n"
+            "Выберите действие:",
+            reply_markup=reply_markup
         )
-    return ADMIN_MENU
+        return CONFIRM_ACTION
 
 @admin_required
-async def block_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Блокировка пользователя"""
-    # В будущем можно добавить функционал блокировки
-    await update.message.reply_text(
-        '🚧 Функция блокировки пользователей находится в разработке.'
-    )
-    return ADMIN_MENU
-
-async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора в админском меню"""
-    choice = update.message.text
+async def handle_user_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка действий с пользователем"""
+    query = update.callback_query
+    await query.answer()
     
-    if choice == "👥 Просмотр пользователей":
-        return await view_users(update, context)
-    elif choice == "👑 Назначить администратора":
+    if query.data == "back_to_list":
+        await view_users(update, context)
+        return SELECT_USER
+    
+    action, user_id = query.data.split('_')[0:2]
+    user_id = int(user_id)
+    
+    with session_scope() as session:
+        user = session.query(User).get(user_id)
+        if not user:
+            await query.message.edit_text("❌ Пользователь не найден")
+            return ADMIN_MENU
+        
+        if action == "make_admin":
+            user.is_admin = True
+            message = f"👑 Пользователь {user.full_name} назначен администратором"
+        elif action == "block":
+            user.is_blocked = True
+            message = f"🚫 Пользователь {user.full_name} заблокирован"
+        elif action == "unblock":
+            user.is_blocked = False
+            message = f"✅ Пользователь {user.full_name} разблокирован"
+        
+        session.commit()
+        
+        # Отправляем уведомление пользователю о изменении его статуса
+        try:
+            if action == "make_admin":
+                await context.bot.send_message(
+                    user_id,
+                    "🎉 Поздравляем! Вам предоставлены права администратора."
+                )
+            elif action == "block":
+                await context.bot.send_message(
+                    user_id,
+                    "⛔️ Ваш аккаунт был заблокирован администратором."
+                )
+            elif action == "unblock":
+                await context.bot.send_message(
+                    user_id,
+                    "✅ Ваш аккаунт был разблокирован администратором."
+                )
+        except:
+            pass  # Игнорируем ошибки отправки уведомлений
+        
+        await query.message.edit_text(
+            f"{message}\n"
+            "Возвращаемся к списку пользователей..."
+        )
+        await view_users(update, context)
+        return SELECT_USER
+
+@admin_required
+async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать статистику"""
+    with session_scope() as session:
+        total_users = session.query(User).count()
+        admin_users = session.query(User).filter(User.is_admin == True).count()
+        blocked_users = session.query(User).filter(User.is_blocked == True).count()
+        active_users = total_users - blocked_users
+        
         await update.message.reply_text(
-            '📝 Используйте команду /set_admin с ID пользователя.\n'
-            'Пример: /set_admin 123456789'
+            "📊 Статистика системы\n\n"
+            f"👥 Всего пользователей: {total_users}\n"
+            f"✅ Активных пользователей: {active_users}\n"
+            f"👑 Администраторов: {admin_users}\n"
+            f"🚫 Заблокированных: {blocked_users}\n"
         )
         return ADMIN_MENU
-    elif choice == "❌ Заблокировать пользователя":
-        return await block_user(update, context)
-    elif choice == "🔙 Вернуться в главное меню":
-        return await show_main_menu(update, context)
+
+@admin_required
+async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора в админском меню"""
+    text = update.message.text
     
-    await update.message.reply_text('❓ Пожалуйста, выберите действие из меню.')
-    return ADMIN_MENU
+    if text == "👥 Управление пользователями":
+        return await view_users(update, context)
+    elif text == "📊 Статистика":
+        return await show_statistics(update, context)
+    elif text == "🔙 Вернуться в главное меню":
+        return await show_main_menu(update, context)
+    else:
+        await update.message.reply_text("❌ Неизвестная команда")
+        return ADMIN_MENU
 
 # Создаем обработчик админского меню
 admin_handler = ConversationHandler(
-    entry_points=[CommandHandler("admin", admin_menu)],
+    entry_points=[
+        MessageHandler(filters.Text(["⚙️ Панель администратора"]), admin_menu),
+        CommandHandler("admin", admin_menu)
+    ],
     states={
         ADMIN_MENU: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_menu),
-            CommandHandler("set_admin", set_admin)
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_menu)
+        ],
+        SELECT_USER: [
+            CallbackQueryHandler(handle_user_selection)
+        ],
+        CONFIRM_ACTION: [
+            CallbackQueryHandler(handle_user_action)
         ]
     },
-    fallbacks=[CommandHandler("cancel", show_main_menu)]
+    fallbacks=[
+        MessageHandler(filters.Text(["🔙 Вернуться в главное меню"]), show_main_menu),
+        CommandHandler("cancel", show_main_menu)
+    ]
 )

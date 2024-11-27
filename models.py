@@ -35,10 +35,18 @@ class Railway(str, Enum):
     SEVERNAYA = "Северная ЖД"
     YUGO_ZAPADNAYA = "Юго-Западная ЖД"
 
-class TrainType(str, Enum):
-    """Типы составов"""
+class TrainCategory(str, Enum):
+    """Категории составов"""
     ELEKTRICHKA = "Электричка"
     RAIL_BUS = "Рельсовый автобус"
+
+class TrainType(str, Enum):
+    """Типы составов"""
+    EP2D = "ЭП2Д"
+    EP3D = "ЭП3Д"
+    RA1 = "РА1"
+    RA2 = "РА2"
+    RA3 = "РА3"
 
 class UserRole(str, Enum):
     """Роли пользователей"""
@@ -58,6 +66,7 @@ class User(Base):
     phone = Column(String, nullable=False)
     role = Column(SQLEnum(UserRole), default=UserRole.USER)
     is_active = Column(Boolean, default=True)
+    is_blocked = Column(Boolean, default=False)
     
     # Отношения
     receptions = relationship("TrainReception", back_populates="user")
@@ -89,10 +98,7 @@ class BlockInTrain(Base):
     reception_id = Column(Integer, ForeignKey('train_receptions.id'), nullable=False)
     block_number = Column(String, nullable=False)
     is_checked = Column(Boolean, default=False)
-    notes = Column(String, nullable=True)  # Добавляем поле для заметок
+    notes = Column(String, nullable=True)
     
     # Отношения
     reception = relationship("TrainReception", back_populates="blocks")
-
-# Создаем все таблицы
-Base.metadata.create_all(engine)

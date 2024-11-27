@@ -9,14 +9,14 @@ from telegram.ext import (
 )
 from datetime import datetime
 
-from models import User, TrainReception, TrainType, BlockInTrain
+from models import User, TrainReception, TrainType, TrainCategory, BlockInTrain
 from database import session_scope
 from handlers.common import show_main_menu, cancel
 from train_blocks import TRAIN_BLOCKS, BLOCK_DESCRIPTIONS, BLOCK_CHECKLIST
 from handlers.reports import show_reception_report, handle_export_pdf
 
 # Состояния приёмки
-CHOOSE_ACTION, ENTER_TRAIN_NUMBER, CHOOSE_TRAIN_TYPE, CHECK_BLOCKS, ENTER_NOTES = range(5)
+CHOOSE_ACTION, ENTER_TRAIN_NUMBER, CHOOSE_TRAIN_CATEGORY, CHOOSE_TRAIN_TYPE, CHECK_BLOCKS, ENTER_NOTES, VIEW_HISTORY = range(7)
 
 async def start_reception(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начало процесса приёмки"""
@@ -36,172 +36,227 @@ async def start_reception(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CHOOSE_ACTION
 
 async def handle_reception_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора действия"""
-    choice = update.message.text
+    """Обработка выбора действия с приёмкой"""
+    choice = update.message.text.strip()
+    
+    if choice == '↩️ Главное меню':
+        return await show_main_menu(update, context)
+    
+    if choice == '📋 История приёмок':
+        return await show_reception_history(update, context)
     
     if choice == '🆕 Новая приёмка':
+        keyboard = [[KeyboardButton('↩️ Отмена')]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await update.message.reply_text(
-            '🔢 Введите номер состава:'
+            '🔢 Введите номер состава:',
+            reply_markup=reply_markup
         )
         return ENTER_TRAIN_NUMBER
-    elif choice == '📋 История приёмок':
-        return await show_reception_history(update, context)
-    elif choice == '↩️ Главное меню':
-        return await show_main_menu(update, context)
-    else:
-        await update.message.reply_text(
-            '⚠️ Пожалуйста, используйте кнопки меню.'
-        )
-        return CHOOSE_ACTION
+    
+    keyboard = [
+        [KeyboardButton('🆕 Новая приёмка')],
+        [KeyboardButton('📋 История приёмок')],
+        [KeyboardButton('↩️ Главное меню')]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text(
+        '⚠️ Пожалуйста, используйте кнопки меню',
+        reply_markup=reply_markup
+    )
+    return CHOOSE_ACTION
 
 async def handle_train_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка ввода номера состава"""
     train_number = update.message.text.strip()
     
-    # Проверяем формат номера
-    if not train_number.isdigit():
+    if train_number == '↩️ Отмена':
+        return await show_main_menu(update, context)
+    
+    if len(train_number) < 2:
         await update.message.reply_text(
-            '⚠️ Номер состава должен содержать только цифры.\n'
-            '🔄 Попробуйте еще раз:'
+            '⚠️ Пожалуйста, введите корректный номер состава'
         )
         return ENTER_TRAIN_NUMBER
     
     # Сохраняем номер в контексте
     context.user_data['train_number'] = train_number
     
-    # Показываем клавиатуру с типами составов
+    # Показываем клавиатуру с категориями составов
     keyboard = [
-        [KeyboardButton('🚅 Электричка')],
-        [KeyboardButton('🚂 Рельсовый автобус')],
+        [KeyboardButton(TrainCategory.ELEKTRICHKA.value), 
+         KeyboardButton(TrainCategory.RAIL_BUS.value)],
         [KeyboardButton('↩️ Отмена')]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
-        '🚂 Выберите тип состава:',
+        'Выберите категорию состава:',
         reply_markup=reply_markup
     )
-    return CHOOSE_TRAIN_TYPE
+    return CHOOSE_TRAIN_CATEGORY
+
+async def handle_train_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора категории состава"""
+    category = update.message.text.strip()
+    
+    if category == '↩️ Отмена':
+        return await show_main_menu(update, context)
+    
+    try:
+        train_category = TrainCategory(category)
+        context.user_data['train_category'] = train_category  # Сохраняем сам enum, а не его значение
+        
+        if train_category == TrainCategory.ELEKTRICHKA:
+            keyboard = [
+                [KeyboardButton(TrainType.EP2D.value), KeyboardButton(TrainType.EP3D.value)],
+                [KeyboardButton('↩️ Назад')]
+            ]
+        else:  # TrainCategory.RAIL_BUS
+            keyboard = [
+                [KeyboardButton(TrainType.RA1.value), KeyboardButton(TrainType.RA2.value), 
+                 KeyboardButton(TrainType.RA3.value)],
+                [KeyboardButton('↩️ Назад')]
+            ]
+        
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text(
+            'Выберите тип состава:',
+            reply_markup=reply_markup
+        )
+        return CHOOSE_TRAIN_TYPE
+        
+    except ValueError:
+        keyboard = [
+            [KeyboardButton(TrainCategory.ELEKTRICHKA.value), 
+             KeyboardButton(TrainCategory.RAIL_BUS.value)],
+            [KeyboardButton('↩️ Отмена')]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
+        await update.message.reply_text(
+            '⚠️ Пожалуйста, выберите категорию состава из предложенных вариантов.',
+            reply_markup=reply_markup
+        )
+        return CHOOSE_TRAIN_CATEGORY
 
 async def handle_train_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка выбора типа состава"""
     type_text = update.message.text.strip()
     
-    if type_text == '↩️ Отмена':
-        return await show_main_menu(update, context)
-    
-    # Определяем тип состава
-    train_type = None
-    if type_text == '🚅 Электричка':
-        train_type = TrainType.ELEKTRICHKA
-    elif type_text == '🚂 Рельсовый автобус':
-        train_type = TrainType.RAIL_BUS
-    else:
+    if type_text == '↩️ Назад':
+        # Возвращаемся к выбору категории
+        keyboard = [
+            [KeyboardButton(TrainCategory.ELEKTRICHKA.value), 
+             KeyboardButton(TrainCategory.RAIL_BUS.value)],
+            [KeyboardButton('↩️ Отмена')]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await update.message.reply_text(
-            '⚠️ Пожалуйста, выберите тип состава из предложенных вариантов.'
+            'Выберите категорию состава:',
+            reply_markup=reply_markup
         )
-        return CHOOSE_TRAIN_TYPE
+        return CHOOSE_TRAIN_CATEGORY
     
-    # Создаем новую приёмку
     try:
+        train_type = TrainType(type_text)
+        
+        # Проверяем соответствие типа категории
+        train_category = context.user_data.get('train_category')
+        if train_category == TrainCategory.ELEKTRICHKA and train_type not in [TrainType.EP2D, TrainType.EP3D]:
+            raise ValueError("Неверный тип для категории Электричка")
+        elif train_category == TrainCategory.RAIL_BUS and train_type not in [TrainType.RA1, TrainType.RA2, TrainType.RA3]:
+            raise ValueError("Неверный тип для категории Рельсовый автобус")
+        
+        # Создаем новую приёмку в БД
         with session_scope() as session:
-            user = session.query(User).filter(User.id == update.effective_user.id).first()
-            if not user:
-                await update.message.reply_text('❌ Ошибка: пользователь не найден')
-                return ConversationHandler.END
-            
             reception = TrainReception(
                 train_number=context.user_data['train_number'],
                 train_type=train_type,
-                user_id=user.id,
-                created_at=datetime.now(),
-                is_completed=False
+                user_id=update.effective_user.id
             )
             session.add(reception)
-            session.flush()  # Получаем ID приёмки
+            session.flush()
             
-            # Создаем блоки для проверки
-            for block_name in TRAIN_BLOCKS[train_type]:
+            # Добавляем блоки для проверки
+            blocks = TRAIN_BLOCKS.get(train_type, [])
+            for block_number in blocks:
                 block = BlockInTrain(
                     reception_id=reception.id,
-                    block_number=block_name,
-                    is_checked=False
+                    block_number=block_number
                 )
                 session.add(block)
             
-            # Сохраняем ID приёмки в контексте
             context.user_data['reception_id'] = reception.id
-            
-            # Получаем первый блок для проверки
-            block = session.query(BlockInTrain).filter(
-                BlockInTrain.reception_id == reception.id,
-                BlockInTrain.is_checked == False
-            ).first()
-            
-            # Показываем информацию о блоке
-            block_info = (
-                f'🔍 <b>Проверка блока: {block.block_number}</b>\n\n'
-                f'📝 Описание:\n{BLOCK_DESCRIPTIONS[block.block_number]}\n\n'
-                '✅ Критерии проверки:\n'
-            )
-            for item in BLOCK_CHECKLIST[block.block_number]:
-                block_info += f'• {item}\n'
-            
-            # Создаем клавиатуру для оценки блока
+            context.user_data['current_block_index'] = 0
+        
+        return await show_next_block(update, context)
+        
+    except ValueError as e:
+        keyboard = []
+        train_category = context.user_data.get('train_category')
+        if train_category == TrainCategory.ELEKTRICHKA:
             keyboard = [
-                [
-                    InlineKeyboardButton("✅ Исправен", callback_data=f"block_ok_{block.id}"),
-                    InlineKeyboardButton("⚠️ Неисправен", callback_data=f"block_fail_{block.id}")
-                ]
+                [KeyboardButton(TrainType.EP2D.value), KeyboardButton(TrainType.EP3D.value)],
+                [KeyboardButton('↩️ Назад')]
             ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                block_info,
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
-            return CHECK_BLOCKS
-            
-    except Exception as e:
-        print(f"❌ Ошибка при создании приёмки: {str(e)}")
+        else:
+            keyboard = [
+                [KeyboardButton(TrainType.RA1.value), KeyboardButton(TrainType.RA2.value), 
+                 KeyboardButton(TrainType.RA3.value)],
+                [KeyboardButton('↩️ Назад')]
+            ]
+        
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await update.message.reply_text(
-            '❌ Произошла ошибка при создании приёмки.\n'
-            '🔄 Пожалуйста, попробуйте еще раз позже.'
+            '⚠️ Пожалуйста, выберите тип состава из предложенных вариантов.',
+            reply_markup=reply_markup
         )
-        return ConversationHandler.END
+        return CHOOSE_TRAIN_TYPE
 
 async def show_next_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает следующий блок для проверки"""
+    # Определяем, откуда пришел запрос
+    message = update.callback_query.message if update.callback_query else update.message
+    
     with session_scope() as session:
+        # Получаем текущую приёмку
+        reception = session.query(TrainReception).filter(
+            TrainReception.id == context.user_data['reception_id']
+        ).first()
+        
+        if not reception:
+            await message.reply_text(
+                '❌ Ошибка: приёмка не найдена',
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton('↩️ Главное меню')]], 
+                                               resize_keyboard=True)
+            )
+            return ConversationHandler.END
+        
         # Получаем следующий непроверенный блок
         block = session.query(BlockInTrain).filter(
-            BlockInTrain.reception_id == context.user_data['reception_id'],
+            BlockInTrain.reception_id == reception.id,
             BlockInTrain.is_checked == False
         ).first()
         
         if not block:
             # Все блоки проверены
-            reception = session.query(TrainReception).get(context.user_data['reception_id'])
             reception.is_completed = True
+            session.commit()
             
-            message_text = (
-                '✅ Приёмка состава завершена!\n\n'
-                f'🚂 Состав №{reception.train_number}\n'
-                f'📅 Дата: {reception.created_at.strftime("%d.%m.%Y %H:%M")}\n'
-                '🏁 Статус: Завершена\n\n'
-                '📋 Сейчас я покажу вам подробный отчет...'
+            keyboard = [
+                [KeyboardButton('🆕 Новая приёмка')],
+                [KeyboardButton('📋 История приёмок')],
+                [KeyboardButton('↩️ Главное меню')]
+            ]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            
+            await message.reply_text(
+                '✅ Приёмка состава завершена!\n'
+                'Выберите дальнейшее действие:',
+                reply_markup=reply_markup
             )
-            
-            if hasattr(update, 'callback_query'):
-                await update.callback_query.message.reply_text(message_text)
-            else:
-                await update.message.reply_text(message_text)
-            
-            # Показываем подробный отчет
-            from handlers.reports import show_reception_report
-            await show_reception_report(update, context)
-            return ConversationHandler.END
+            return CHOOSE_ACTION
         
         # Показываем информацию о блоке
         block_info = (
@@ -209,6 +264,7 @@ async def show_next_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f'📝 Описание:\n{BLOCK_DESCRIPTIONS[block.block_number]}\n\n'
             '✅ Критерии проверки:\n'
         )
+        
         for item in BLOCK_CHECKLIST[block.block_number]:
             block_info += f'• {item}\n'
         
@@ -221,18 +277,11 @@ async def show_next_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        if hasattr(update, 'callback_query'):
-            await update.callback_query.message.reply_text(
-                block_info,
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
-        else:
-            await update.message.reply_text(
-                block_info,
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
+        await message.reply_text(
+            block_info,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
         return CHECK_BLOCKS
 
 async def handle_block_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -276,70 +325,138 @@ async def handle_block_notes(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return await show_next_block(update, context)
 
 async def show_reception_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает историю приёмок пользователя"""
+    """Показать историю приёмок"""
+    # Отмечаем, откуда пришел пользователь
+    context.user_data['from_main_menu'] = update.message.text == '📋 История приёмок'
+    print(f"Opening history from main menu: {context.user_data['from_main_menu']}")  # Отладочный вывод
+    
     with session_scope() as session:
         # Получаем последние 10 приёмок пользователя
-        receptions = session.query(TrainReception)\
-            .filter(TrainReception.user_id == update.effective_user.id)\
-            .order_by(TrainReception.created_at.desc())\
-            .limit(10)\
-            .all()
+        receptions = session.query(TrainReception).filter(
+            TrainReception.user_id == update.effective_user.id
+        ).order_by(TrainReception.created_at.desc()).limit(10).all()
         
         if not receptions:
+            keyboard = [
+                [KeyboardButton('🆕 Новая приёмка')],
+                [KeyboardButton('↩️ Главное меню')]
+            ]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
             await update.message.reply_text(
-                '📋 История приёмок пуста.\n'
-                'Начните новую приёмку!'
+                '📝 История приёмок пуста.',
+                reply_markup=reply_markup
             )
-            return await start_reception(update, context)
+            return CHOOSE_ACTION
         
-        # Создаем клавиатуру с кнопками для каждой приёмки
+        # Создаем инлайн-кнопки для каждой приёмки
         keyboard = []
         for reception in receptions:
             status = "✅" if reception.is_completed else "🔄"
-            button_text = f"{status} Состав №{reception.train_number} ({reception.created_at.strftime('%d.%m.%Y')})"
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"view_reception_{reception.id}")])
+            button = InlineKeyboardButton(
+                f"{status} {reception.train_type.value} №{reception.train_number} "
+                f"({reception.created_at.strftime('%d.%m.%Y %H:%M')})",
+                callback_data=f"view_reception_{reception.id}"
+            )
+            keyboard.append([button])
+            print(f"Created button with callback_data: view_reception_{reception.id}")  # Отладочный вывод
         
+        # Добавляем кнопку возврата
         keyboard.append([InlineKeyboardButton("↩️ Назад", callback_data="back_to_reception")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            '📋 <b>История приёмок</b>\n\n'
-            'Выберите приёмку для просмотра отчета:',
-            reply_markup=reply_markup,
-            parse_mode='HTML'
+            "📋 История приёмок\nВыберите приёмку для просмотра:",
+            reply_markup=reply_markup
         )
-        return CHECK_BLOCKS
+        # Возвращаем соответствующее состояние VIEW_HISTORY
+        return 1 if context.user_data.get('from_main_menu') else VIEW_HISTORY
 
 async def handle_history_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка выбора приёмки из истории"""
     query = update.callback_query
-    await query.answer()
+    print(f"Received callback query: {query}")  # Отладочный вывод
+    print(f"Callback data: {query.data}")  # Отладочный вывод
     
-    if query.data == "back_to_reception":
-        return await start_reception(update, context)
-    
-    reception_id = int(query.data.split('_')[2])
-    from handlers.reports import show_reception_report
-    await show_reception_report(update, context, reception_id)
-    return CHECK_BLOCKS
+    try:
+        await query.answer()
+        
+        if query.data == "back_to_reception":
+            # Возвращаемся к меню
+            keyboard = [
+                [KeyboardButton('🆕 Новая приёмка')],
+                [KeyboardButton('📋 История приёмок')],
+                [KeyboardButton('↩️ Главное меню')]
+            ]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            await query.message.reply_text(
+                '🚂 Выберите действие:',
+                reply_markup=reply_markup
+            )
+            # Возвращаем в соответствующее меню в зависимости от источника
+            if context.user_data.get('from_main_menu'):
+                await show_main_menu(update, context)
+                return ConversationHandler.END
+            return CHOOSE_ACTION
+        
+        if query.data.startswith('view_reception_'):
+            # Показываем детали выбранной приёмки
+            reception_id = int(query.data.split('_')[2])
+            print(f"Showing reception with ID: {reception_id}")  # Отладочный вывод
+            await show_reception_report(update, context, reception_id)
+            # Возвращаем соответствующее состояние VIEW_HISTORY
+            return VIEW_HISTORY
+        
+        if query.data.startswith('export_pdf_'):
+            # Обработка экспорта в PDF
+            reception_id = int(query.data.split('_')[2])
+            print(f"Exporting reception with ID: {reception_id}")  # Отладочный вывод
+            await handle_export_pdf(update, context)
+            return VIEW_HISTORY
+        
+        print(f"Unknown callback data: {query.data}")  # Отладочный вывод
+        return VIEW_HISTORY
+        
+    except Exception as e:
+        print(f"Error in handle_history_selection: {str(e)}")  # Отладочный вывод
+        await query.message.reply_text(
+            "❌ Произошла ошибка при обработке запроса.\n"
+            "Пожалуйста, попробуйте еще раз или начните новую приёмку."
+        )
+        return CHOOSE_ACTION
 
-# Создаем обработчик для приёмки
+# Обработчик приёмки составов
 reception_handler = ConversationHandler(
     entry_points=[MessageHandler(filters.Text(['🚂 Приёмка состава']), start_reception)],
     states={
-        CHOOSE_ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reception_choice)],
-        ENTER_TRAIN_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_train_number)],
-        CHOOSE_TRAIN_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_train_type)],
+        CHOOSE_ACTION: [
+            MessageHandler(filters.Text(['🆕 Новая приёмка', '📋 История приёмок']), handle_reception_choice),
+            MessageHandler(filters.Text(['↩️ Главное меню']), show_main_menu)
+        ],
+        ENTER_TRAIN_NUMBER: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_train_number)
+        ],
+        CHOOSE_TRAIN_CATEGORY: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_train_category)
+        ],
+        CHOOSE_TRAIN_TYPE: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_train_type)
+        ],
         CHECK_BLOCKS: [
             CallbackQueryHandler(handle_block_check, pattern=r'^block_(ok|fail)_\d+$'),
-            CallbackQueryHandler(handle_history_selection, pattern=r'^view_reception_\d+$'),
-            CallbackQueryHandler(handle_history_selection, pattern=r'^back_to_reception$'),
-            CallbackQueryHandler(handle_export_pdf, pattern=r'^export_pdf_\d+$')
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_block_notes)
         ],
-        ENTER_NOTES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_block_notes)],
+        ENTER_NOTES: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_block_notes)
+        ],
+        VIEW_HISTORY: [
+            CallbackQueryHandler(handle_history_selection, pattern=r'^(view_reception_\d+|back_to_reception|export_pdf_\d+)$'),
+            MessageHandler(filters.Text(['↩️ Главное меню']), show_main_menu)
+        ]
     },
     fallbacks=[
         CommandHandler('cancel', cancel),
+        MessageHandler(filters.Text(['↩️ Отмена', '↩️ Назад']), cancel),
         MessageHandler(filters.Text(['↩️ Главное меню']), show_main_menu)
-    ]
+    ],
+    allow_reentry=True
 )
